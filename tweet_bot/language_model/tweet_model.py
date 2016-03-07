@@ -10,8 +10,10 @@ from random import random
 
 from nltk.tokenize import TweetTokenizer
 
+from tweet_model_generator import TweetModelGenerator
+
 # This constant determines the discount used by the language model.
-DISCOUNT = os.environ.get('DISCOUNT', 0.3)
+DISCOUNT = float(os.environ.get('DISCOUNT', 0.6))
 
 
 class MarkovDict(defaultdict):
@@ -24,7 +26,7 @@ class MarkovDict(defaultdict):
     >>> tweet_model.train('This is a tweet')
     >>> tweet_model.train('This is not')
     >>> tweet_model.train('This could be a tweet')
-    >>> tweet_model.trigrams
+    >>> tweet_model.quadgrams
     defaultdict(<class 'collections.Counter'>, {u'* This could': Counter({u'be': 1}), u'* This is': Counter({u'a': 1, u'not': 1}), u'could be a': Counter({u'tweet': 1}), u'* * This': Counter({u'is': 2, u'could': 1}), u'This is a': Counter({u'tweet': 1}), u'be a tweet': Counter({'$eos': 1}), u'is a tweet': Counter({'$eos': 1}), u'This is not': Counter({'$eos': 1}), u'This could be': Counter({u'a': 1}), '* * *': Counter({u'This': 3})})
     """
 
@@ -39,13 +41,13 @@ class MarkovDict(defaultdict):
         >>> tweet_model = TweetModel()
         >>> tweet_model.train('This is a very good tweet')
         >>> tweet_model.train('This is not a very very good tweet')
-        >>> tweet_model.unigrams._get_total('This')
+        >>> tweet_model.bigrams._get_total('This')
         2
-        >>> tweet_model.unigrams._get_total('very')
+        >>> tweet_model.bigrams._get_total('very')
         3
-        >>> tweet_model.unigrams._get_total('twitter')
+        >>> tweet_model.bigrams._get_total('twitter')
         0
-        >>> tweet_model.unigrams
+        >>> tweet_model.bigrams
         defaultdict(<class 'collections.Counter'>, {u'a': Counter({u'very': 2}), u'good': Counter({u'tweet': 2}), u'This': Counter({u'is': 2}), u'is': Counter({u'a': 1, u'not': 1}), '*': Counter({u'This': 2}), u'very': Counter({u'good': 2, u'very': 1}), u'not': Counter({u'a': 1}), u'tweet': Counter({'$eos': 2})})
         """
         total = sum(self[n_gram].values())
@@ -63,7 +65,7 @@ class MarkovDict(defaultdict):
         >>> tweet_model = TweetModel()
         >>> tweet_model.train('This is a very good tweet')
         >>> tweet_model.train('This is not a very good tweet')
-        >>> tweet_model.unigrams.get_max_likelihoods('is')
+        >>> tweet_model.bigrams.get_max_likelihoods('is')
         {u'a': 0.5, u'not': 0.5}
         """
         # Make sure that the discount is a float so that
@@ -121,7 +123,7 @@ class TweetModel(object):
     DISCOUNT = DISCOUNT
 
     def __init__(self):
-        self.unigrams = MarkovDict()
+        self.unigrams = Counter()
         self.bigrams = MarkovDict()
         self.trigrams = MarkovDict()
         self.quadgrams = MarkovDict()
@@ -132,91 +134,17 @@ class TweetModel(object):
         """
         tokens = self.TOKENIZER.tokenize(text)
 
-        unigrams = self._get_unigrams(tokens)
         bigrams = self._get_bigrams(tokens)
         trigrams = self._get_trigrams(tokens)
         quadgrams = self._get_quadgrams(tokens)
 
-        self.unigrams += unigrams
+        self.unigrams.update(tokens)
         self.bigrams += bigrams
         self.trigrams += trigrams
         self.quadgrams += quadgrams
 
-    def __iter__(self):
-        class TweetModelGenerator(object):
-            """
-            This class is a generator used to generate output according
-            to the observed probabilities of a TweetModel.
-            """
-            def __init__(self, tweet_model):
-                # `self.state` is a list of tokens that
-                #  have been output thusfar.
-                self.state = ['*', '*', '*', '*']
-                self.tweet_model = tweet_model
-
-            def _get_likelihoods(self, n, markov_dict):
-                """
-                Helper function to get a dict of likelihoods
-                from a MarkovDict object.
-                """
-                model = self.tweet_model
-                # Get the current state of the generator
-                state = ' '.join(self.state[-n:])
-                # Don't use a discount when getting unigram probability
-                discount = model.DISCOUNT if n > 1 else 0
-                return markov_dict.get_max_likelihoods(
-                        state,
-                        discount=discount)
-
-            @staticmethod
-            def _weighted_random_choice(tokens):
-                """
-                Takes a dict where keys are tokens, and values
-                are the relative probabilities, and chooses one
-                proportionally.
-                """
-                rand = random() * sum(tokens[token] for token in tokens)
-                for token, weight in tokens:
-                    rand -= weight
-                    if rnd < 0:
-                        return i
-
-            @staticmethod
-            def _backoff(markov_dicts):
-                """
-                Takes a list of MarkovDicts and gives you a token,
-                using a weighted random choice. If the first
-                MarkovDict randomly selects the missing probability
-                mass, it will back off to the next one.
-                """
-                # Just to shorten lines of code
-                tmg = TweetModelGenerator
-                markov_dict = markov_dicts[0]
-                token = tmg._weighted_random_choice(markov_dict)
-                if token == '$MPM':
-                    return tmg._backoff(markov_dicts[1:])
-                else:
-                    return token
-
-            def __iter__(self):
-                unigrams = self._get_likelihoods(1, model.unigrams)
-                bigrams = self._get_likelihoods(2, model.bigrams)
-                trigrams = self._get_likelihoods(3, model.trigrams)
-                quadgrams = self._get_likelihoods(4, model.quadgrams)
-
-                token = self._backoff([
-                    quadgrams,
-                    trigrams,
-                    bigrams,
-                    unigrams])
-                if token == self.tweet_model.EOS:
-                    raise StopIteration
-                else:
-                    self.state.append(token)
-                    yield token
-
-        return TweetModelGenerator(self)
-                
+    def get_generator(self):
+        return (token for token in TweetModelGenerator(self))
 
     @staticmethod
     def _get_n_grams(tokens, n):
@@ -236,20 +164,16 @@ class TweetModel(object):
         return n_grams
 
     @staticmethod
-    def _get_unigrams(tokens):
+    def _get_bigrams(tokens):
         return TweetModel._get_n_grams(tokens, 1)
 
     @staticmethod
-    def _get_bigrams(tokens):
+    def _get_trigrams(tokens):
         return TweetModel._get_n_grams(tokens, 2)
 
     @staticmethod
-    def _get_trigrams(tokens):
-        return TweetModel._get_n_grams(tokens, 3)
-
-    @staticmethod
     def _get_quadgrams(tokens):
-        return TweetModel._get_n_grams(tokens, 4)
+        return TweetModel._get_n_grams(tokens, 3)
 
 
 if __name__ == '__main__':
@@ -266,11 +190,6 @@ if __name__ == '__main__':
     for tweet in tweets:
         model.train(tweet)
 
-    for token in model:
-        print token, 
-
-
-
-
-
+    for token in model.get_generator():
+        print token,
 
